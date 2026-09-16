@@ -21,6 +21,7 @@ import numpy as np
 import os
 import sys
 import time
+from pathlib import Path
 from typing import List, Tuple
 
 import torch
@@ -37,9 +38,11 @@ logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(name)s - %(le
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
-# Add module paths
-sys.path.insert(0, os.path.abspath('../modules/deepspeech/src'))
-sys.path.insert(0, os.path.abspath('../src/'))
+# Resolve imports relative to this file so the CLI works from any directory.
+SRC_DIR = Path(__file__).resolve().parent
+REPO_ROOT = SRC_DIR.parent
+sys.path.insert(0, str(REPO_ROOT / 'modules' / 'deepspeech' / 'src'))
+sys.path.insert(0, str(SRC_DIR))
 
 # Local imports
 from ctc.ctc_loss_imp import *
@@ -53,7 +56,7 @@ from utils.util import *
 
 # Implements the model to use for the reconstruction
 def get_model(args, use_relu):
-    device = 'cuda:0'
+    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     if args.model_name.lower() == 'deepspeech2' or args.model_name.lower() == 'ds2':
         model = DeepSpeech2(winlen=0.032, winstep=0.02).to(device)
     elif args.model_name.lower() == 'deepspeech1' or args.model_name.lower() == 'ds1':
@@ -171,7 +174,7 @@ def reconstruct_dataset(network, device, dataloader, args):
 
         # Capture the DS1 weights so downstream decoders can replay the exact model.
         network_state = {}
-        for key, value in model.state_dict().items():
+        for key, value in network.state_dict().items():
             if not torch.is_tensor(value):
                 continue
             cpu_value = value.detach().cpu()
