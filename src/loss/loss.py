@@ -1,7 +1,9 @@
 import torch
 def grad_distance(g1, g2, args):
+    if g1.shape != g2.shape or not 0 < args.top_grad_percentage <= 1:
+        raise ValueError("matching gradient shapes and top_grad_percentage in (0,1] required")
     if args.top_grad_percentage < 1.0 and g1.dim() >=2 : # only do this for 2D or higher
-        top_k = int(args.top_grad_percentage * g2.numel())
+        top_k = max(1, int(args.top_grad_percentage * g2.numel()))
         g1 = g1.flatten()
         g2 = g2.flatten()
         # import ipdb;ipdb.set_trace()

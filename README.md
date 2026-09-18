@@ -1,5 +1,51 @@
 # Federated ASR Gradient Inversion
 
+## Reproduce the numerical/privacy diagnostic on CPU
+
+```bash
+python3.13 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements-cpu.txt
+OMP_NUM_THREADS=1 python -m pytest tests -q
+OMP_NUM_THREADS=1 python reproduce_cpu.py
+```
+
+![Synthetic CTC diagnostic](reports/cpu-diagnostic/diagnostic.png)
+
+This is an authorized **synthetic-feature diagnostic**, not speech recovery:
+12 frames × 3 generated features, a random tiny convolutional teacher, a known
+three-token transcript, and last-layer gradients. Seeds 7, 19 and 41 each run
+250 updates with clean gradients and with relative noise 0.1. The
+[complete results](reports/cpu-diagnostic/metrics.json) include every sampled
+loss/feature-error point; the feature arrays are included alongside the plot.
+
+Clean-gradient relative matching error reaches 0.00025–0.00157, while feature
+MAE remains 0.95–1.14. **A good gradient fit is not exact input recovery.** Noise
+raises the fit floor in this fixture, but this is not a differential-privacy
+mechanism or guarantee, a real ASR benchmark, or an intelligibility result.
+
+### Correctness fixes verified by regression tests
+
+- CTC honors each input/target length, repeated labels and empty transcripts.
+  Its values and first derivatives match PyTorch; numerical `gradgradcheck`
+  verifies the second derivatives needed for gradient matching. Unreachable
+  states no longer introduce NaN curvature. Old implementations remain under
+  `src/ctc/legacy_ctc_loss_imp.py` for provenance, not production use.
+- Grid updates have hard boundaries, even with Adam momentum/weight decay.
+  Optimizer and scheduler states reset between grids; remainder updates are
+  allocated instead of dropped. An actual three-grid test verifies update count
+  and exact checkpoint resumption.
+- `--resume_grids` is now explicit and checks a model/gradient/config signature.
+  Old unsigned grid checkpoints cannot be resumed; use a fresh output directory
+  to rerun them. Do not mix checkpoints from different teachers or targets.
+- L1 regularization is implemented, regularization zeros stay on-device, and
+  observed/matched gradients use the same evaluation-mode model state.
+- Metrics omit WER without a compatible trained decoder. An invalid checkpoint
+  fails instead of silently falling back to random weights.
+
+Seven tests and this CPU diagnostic are run in CI. Full DS1/DS2 GPU experiments,
+the external speech dataset, and historical paper figures were **not rerun**.
+
 Research code and recorded artifacts for reconstructing long-form speech features from gradients produced by CTC-based automatic speech recognition models.
 
 This repository accompanies the paper [Long-Form Speech Reconstruction from Gradients in Federated ASR using CTC Loss](https://takakhoo.com/docs/federated-asr-gradient-paper.pdf). It extends an earlier DeepSpeech gradient-matching pipeline with log-space CTC, overlapping temporal grids, per-grid optimizer resets, checkpoints, and analysis tooling.
@@ -39,11 +85,11 @@ The committed November 2025 artifact uses DeepSpeech1, a 10-second LibriSpeech s
 | Metric | Recorded value | Interpretation |
 |---|---:|---|
 | Global MFCC MAE | 8.78 | Feature-space reconstruction error |
-| Waveform SNR | -0.33 dB | Inverse-MFCC audio remains poor |
+| MFCC-space SNR | -0.33 dB | Feature-space error, not waveform SNR |
 | Decoder WER | 1.00 | The saved evaluation used a randomly initialized decoder and is not a valid intelligibility result |
 | Runtime | 3,200 s | Single recorded long-form run |
 
-These values come directly from [`metrics.json`](reports/2025-11-22-long10s/metrics.json). The negative SNR and invalid decoder setup are retained because they are important limitations, not hidden as failed experiments.
+These values come directly from [`metrics.json`](reports/2025-11-22-long10s/metrics.json). The negative feature-space SNR and invalid decoder setup are retained as historical limitations. New metrics identify the SNR domain and do not produce a random-decoder WER.
 
 ## Quick start
 

@@ -67,6 +67,7 @@ def get_model(args, use_relu):
 
 def reconstruct_dataset(network, device, dataloader, args):
     torch.manual_seed(0)
+    network.eval()  # Same dropout/batchnorm state for observed and matched gradients.
 
     # loop through item in the dataloader
     for (i, batch) in enumerate(dataloader):
@@ -111,7 +112,10 @@ def reconstruct_dataset(network, device, dataloader, args):
         else:
             raise ValueError(f"Unknown model name: {args.model_name}")
             
-        output_sizes = (torch.ones(out.shape[1]) * out.shape[0]).int()
+        if args.model_name.lower() in ('deepspeech2', 'ds2'):
+            output_sizes = torch.tensor([network.network.output_len(int(n)) for n in input_sizes], dtype=torch.long)
+        else:
+            output_sizes = input_sizes.detach().cpu().long()
         out =  out.log_softmax(-1)
 
         loss_func = lambda x,y : batched_ctc_v2(x, y, output_sizes, target_sizes)
@@ -246,6 +250,7 @@ def main(args):
     logger.info('Log file: {}'.format(log_file))
 
     # model & devices
+    torch.manual_seed(0)  # Seed BEFORE model creation, not only reconstruction.
     device, model = get_model(args, use_relu=False)
     logger.info('Device: {}'.format(device))
     logger.info('Network: {}'.format((model.__class__.__name__)))
@@ -325,6 +330,7 @@ def parse_args():
 
     # optimization params
     parser.add_argument("--resume_from_first_order", action='store_true', help="Whether to resume from first order optimization checkpoint", default=False)
+    parser.add_argument("--resume_grids", action='store_true', help="Resume only grid checkpoints with matching model/gradient/config provenance")
     parser.add_argument("--num_seeds"            , type=int  , default=10        , help="Number of random seeds to try")
     parser.add_argument("--optimizer"            , type=str  , default='Adam'    , help="Optimizer to use for optimization")
     parser.add_argument("--learning_rate"        , type=float, default=0.01      , help="Learning rate for first-order optimization")

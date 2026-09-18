@@ -1,11 +1,11 @@
 import torch
 import matplotlib.pyplot as plt
-import seaborn as sns
-from IPython.display import display
 import datetime
 import os
 
 def plot_mfcc(mfcc_tensor):
+    import seaborn as sns
+    from IPython.display import display
     """
     Plots MFCC features with shape [time_steps, 29] in a Jupyter notebook.
     
@@ -27,6 +27,7 @@ def plot_mfcc(mfcc_tensor):
     plt.close()
 
 def plot_four_graphs(gt_tensor, reconstructed_tensor, loss, loss_grad, loss_reg,epoch, prefix='', args=None):
+    import seaborn as sns
     """
     Plot four graphs: ground truth spectrogram, reconstructed spectrogram, 
     difference between the two, and loss over epoch.

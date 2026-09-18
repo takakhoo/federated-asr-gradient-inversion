@@ -6,6 +6,8 @@ by matching gradients with respect to model parameters.
 """
 
 from datetime import datetime
+from copy import deepcopy
+from grid import grid_ranges, masked_step, experiment_signature
 
 import logging
 import matplotlib
@@ -66,7 +68,7 @@ def plot_loss_curves(loss_history, loss_gm_history, loss_reg_history, prefix, ar
     # Plot 4: All losses together (log scale)
     axes[1, 1].semilogy(loss_history, 'b-', linewidth=2, label='Total Loss', alpha=0.7)
     axes[1, 1].semilogy(loss_gm_history, 'g-', linewidth=2, label='Gradient Matching', alpha=0.7)
-    if max(loss_reg_history) > 0:
+    if loss_reg_history and max(loss_reg_history) > 0:
         axes[1, 1].semilogy(loss_reg_history, 'r-', linewidth=2, label='Regularization', alpha=0.7)
     axes[1, 1].set_xlabel('Iteration')
     axes[1, 1].set_ylabel('Loss (log scale)')
@@ -204,7 +206,7 @@ def first_order_optimization_loop(inputs, x_param, output_sizes, target_sizes,
     Returns:
         Optimized x_param
     """
-    model.train()
+    model.eval()
     loss_func = lambda x,y : batched_ctc_v2(x, y, output_sizes, target_sizes)
 
     i=0
@@ -229,12 +231,12 @@ def first_order_optimization_loop(inputs, x_param, output_sizes, target_sizes,
         if args.regularization == 'L2':
             regloss = torch.norm(x_param, p=2)
         elif args.regularization == 'L1':
-            pass
+            regloss = torch.norm(x_param, p=1)
         elif args.regularization == 'TV':
             # need to make x_param from [n_frame, batch size, n_features] to [batch size, 1, n_features, n_frame]
             regloss = tv_norm(x_param.permute(1,0,2).unsqueeze(1))
         else:
-            regloss = torch.tensor(0.0)
+            regloss = x_param.new_zeros(())
        
         loss = (1-args.reg_weight)* mloss + args.reg_weight * regloss
 
@@ -308,14 +310,23 @@ def first_order_optimization_grid_loop(inputs, x_param, output_sizes, target_siz
     Returns:
         Optimized x_param
     """
-    model.train()
+    model.eval()
     loss_func = lambda x,y: batched_ctc_v2(x, y, output_sizes, target_sizes)
     
     n_frames, batch_size, n_features = x_param.shape
     stride = grid_size - overlap
     
     # Calculate number of grids needed to cover all frames
-    n_grids = max(1, int(np.ceil((n_frames - overlap) / stride)))
+    windows = grid_ranges(n_frames, grid_size, overlap)
+    n_grids = len(windows)
+    initial_optimizer = deepcopy(optimizer.state_dict())
+    initial_scheduler = deepcopy(scheduler.state_dict())
+    signature = experiment_signature(model, targets, dldw_targets, {
+        "grid_size": grid_size, "overlap": overlap, "shape": list(x_param.shape),
+        "updates": args.max_iterations, "optimizer": initial_optimizer["param_groups"],
+        "regularization": args.regularization, "reg_weight": args.reg_weight,
+        "distance": args.distance_metric, "top_fraction": args.top_grad_percentage,
+        "distance_weight": getattr(args, "distance_metric_weight", None)})
     
     logger.info(f'Grid optimization: n_frames={n_frames}, grid_size={grid_size}, overlap={overlap}, stride={stride}, n_grids={n_grids}')
     
@@ -348,6 +359,9 @@ def first_order_optimization_grid_loop(inputs, x_param, output_sizes, target_siz
     
     # Iterate through each grid
     for grid_idx in range(n_grids):
+        optimizer.load_state_dict(deepcopy(initial_optimizer))
+        scheduler.load_state_dict(deepcopy(initial_scheduler))
+        stop_condition = False
         start_frame = grid_idx * stride
         end_frame = min(start_frame + grid_size, n_frames)
         
@@ -358,18 +372,20 @@ def first_order_optimization_grid_loop(inputs, x_param, output_sizes, target_siz
         blend_mask = create_blend_mask(grid_idx, start_frame, end_frame)
         
         checkpoint_path = os.path.join(args.exp_path, f'{prefix}_grid{grid_idx}_checkpoint.pt')
-        if os.path.exists(checkpoint_path):
+        if getattr(args, "resume_grids", False) and os.path.exists(checkpoint_path):
             logger.info(f'Found checkpoint for grid {grid_idx + 1}/{n_grids} at {checkpoint_path}; loading and skipping optimization.')
-            checkpoint_tensor = torch.load(checkpoint_path)
-            if isinstance(checkpoint_tensor, dict) and 'x_param' in checkpoint_tensor:
-                checkpoint_tensor = checkpoint_tensor['x_param']
-            x_param.data.copy_(checkpoint_tensor.to(x_param.device))
+            checkpoint = torch.load(checkpoint_path, map_location=x_param.device, weights_only=True)
+            if not isinstance(checkpoint, dict) or checkpoint.get("signature") != signature:
+                raise ValueError("Grid checkpoint provenance mismatch; start a fresh run")
+            checkpoint_tensor = checkpoint['x_param']
+            with torch.no_grad():
+                x_param.copy_(checkpoint_tensor.to(x_param.device))
             optimized_segments.append(x_param[start_frame:end_frame].detach().clone())
             segment_masks.append(blend_mask[start_frame:end_frame])
             continue
 
         # Optimize this grid segment for a subset of iterations
-        grid_iterations = args.max_iterations // n_grids
+        grid_iterations = args.max_iterations // n_grids + int(grid_idx < args.max_iterations % n_grids)
         grid_i = 0
         
         while grid_i < grid_iterations and not stop_condition:
@@ -388,10 +404,12 @@ def first_order_optimization_grid_loop(inputs, x_param, output_sizes, target_siz
             # Regularization
             if args.regularization == 'L2':
                 regloss = torch.norm(x_param[start_frame:end_frame], p=2)
+            elif args.regularization == 'L1':
+                regloss = torch.norm(x_param[start_frame:end_frame], p=1)
             elif args.regularization == 'TV':
                 regloss = tv_norm(x_param[start_frame:end_frame].permute(1, 0, 2).unsqueeze(1))
             else:
-                regloss = torch.tensor(0.0)
+                regloss = x_param.new_zeros(())
             
             loss = (1 - args.reg_weight) * mloss + args.reg_weight * regloss
             
@@ -407,7 +425,7 @@ def first_order_optimization_grid_loop(inputs, x_param, output_sizes, target_siz
             else:
                 grad = torch.zeros_like(x_param)
             
-            optimizer.step()
+            masked_step(optimizer, x_param, start_frame, end_frame)
             scheduler.step()
             
             mae = torch.mean(torch.abs(x_param[start_frame:end_frame] - inputs[start_frame:end_frame]))
@@ -433,7 +451,7 @@ def first_order_optimization_grid_loop(inputs, x_param, output_sizes, target_siz
             if grid_i > args.patience and loss_history[-1] > min(loss_history[-args.patience:]):
                 stop_condition = True
         
-        torch.save(x_param.detach().cpu(), checkpoint_path)
+        torch.save({"x_param": x_param.detach().cpu(), "signature": signature}, checkpoint_path)
         logger.info(f'Saved checkpoint for grid {grid_idx + 1}/{n_grids} to {checkpoint_path}')
 
         # Store the optimized segment with its mask for final blending (if needed)

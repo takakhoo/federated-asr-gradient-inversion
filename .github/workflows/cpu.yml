@@ -1,0 +1,18 @@
+name: Reproduce CTC privacy diagnostic
+on: [push, pull_request]
+jobs:
+  cpu:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: pip install -r requirements-cpu.txt
+      - run: OMP_NUM_THREADS=1 python -m pytest tests -q
+      - run: OMP_NUM_THREADS=1 python reproduce_cpu.py
+      - run: python -m compileall -q src
+      - uses: actions/upload-artifact@v4
+        with:
+          name: synthetic-ctc-diagnostic
+          path: reports/cpu-diagnostic

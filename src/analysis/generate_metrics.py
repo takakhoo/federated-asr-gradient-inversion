@@ -20,7 +20,6 @@ PROJECT_SRC = os.path.abspath(os.path.join(CURRENT_DIR, ".."))
 if PROJECT_SRC not in sys.path:
     sys.path.append(PROJECT_SRC)
 
-from models.ds1 import DeepSpeech1WithContextFrames  # noqa: E402
 
 
 def compute_mae(a: np.ndarray, b: np.ndarray) -> float:
@@ -36,6 +35,8 @@ def compute_snr(a: np.ndarray, b: np.ndarray, eps: float = 1e-8) -> float:
 
 
 def iter_segments(n_frames: int, grid_size: int, stride: int) -> List[Tuple[int, int, int]]:
+    if n_frames < 1 or grid_size < 1 or not 0 < stride <= grid_size:
+        raise ValueError("require positive frames/grid and 0 < stride <= grid size")
     segments = []
     grid_idx = 0
     start = 0
@@ -113,7 +114,7 @@ def word_error_rate(ref: str, hyp: str) -> float:
 
 def reconstruct_audio(mfcc: np.ndarray, sample_rate: int) -> np.ndarray:
     # librosa expects shape (n_mfcc, n_frames)
-    return librosa.feature.inverse.mfcc_to_audio(mfcc.T, sr=sample_rate)
+    return librosa.feature.inverse.mfcc_to_audio(mfcc.T, sr=sample_rate, random_state=7)
 
 
 def main():
@@ -132,8 +133,8 @@ def main():
         help=(
             "Optional DS1 checkpoint. Accepts either (a) files whose top-level key "
             "is 'network' (Minh's format) or (b) raw state_dicts where keys already "
-            "include the 'network.' prefix. If omitted we fall back to the deterministic "
-            "random init seeded below."
+            "include the 'network.' prefix. If omitted, WER is omitted rather than "
+            "reported from an untrained random decoder."
         ),
     )
     args = parser.parse_args()
@@ -142,7 +143,7 @@ def main():
     if not os.path.exists(payload_path):
         raise FileNotFoundError(f"Could not find payload at {payload_path}")
 
-    payload = torch.load(payload_path)
+    payload = torch.load(payload_path, map_location="cpu", weights_only=True)
     recon = payload["x_param"].squeeze(1).cpu().numpy()
     gt = payload["inputs"].squeeze(1).cpu().numpy()
     transcript = payload.get("transcript", "").strip()
@@ -196,43 +197,23 @@ def main():
     recon_audio_path = os.path.join(analysis_dir, f"sampleidx_{args.sample_idx}_reconstruction.wav")
     sf.write(recon_audio_path, recon_audio, args.sample_rate)
 
-    torch.manual_seed(0)
-    decoder_model = DeepSpeech1WithContextFrames(
-        n_context=args.context_frames,
-        drop_prob=args.dropout_prob,
-        use_relu=False,
-    ).cpu()
-
+    hypothesis = None
+    wer_value = None
     if args.decoder_checkpoint is not None:
-        ckpt_state = torch.load(args.decoder_checkpoint, map_location="cpu")
-        state_dict = None
-        if isinstance(ckpt_state, dict):
-            if "network" in ckpt_state and isinstance(ckpt_state["network"], dict):
-                state_dict = {f"network.{k}": v for k, v in ckpt_state["network"].items()}
-            elif any(k.startswith("network.") for k in ckpt_state.keys()):
-                state_dict = ckpt_state
-
-        if state_dict is not None:
-            missing, unexpected = decoder_model.load_state_dict(state_dict, strict=False)
-            print(f"[decoder] Loaded checkpoint: {args.decoder_checkpoint}")
-            if missing:
-                print(f"[decoder]   Missing keys: {missing}")
-            if unexpected:
-                print(f"[decoder]   Unexpected keys: {unexpected}")
-        else:
-            print(
-                f"[decoder] WARNING: Could not find a usable DS1 state_dict inside "
-                f"{args.decoder_checkpoint}. Using seeded random init instead."
-            )
+        from models.ds1 import DeepSpeech1WithContextFrames
+        decoder_model = DeepSpeech1WithContextFrames(
+            n_context=args.context_frames, drop_prob=args.dropout_prob, use_relu=False).cpu()
+        state = torch.load(args.decoder_checkpoint, map_location="cpu", weights_only=True)
+        if isinstance(state, dict) and isinstance(state.get("network"), dict):
+            state = {f"network.{k}": v for k, v in state["network"].items()}
+        decoder_model.load_state_dict(state, strict=True)
+        decoder_model.eval()
+        with torch.no_grad():
+            logits = decoder_model(torch.from_numpy(recon).unsqueeze(1))
+        hypothesis = ctc_greedy_decode(logits, decoder_model.ALPHABET)
+        wer_value = word_error_rate(transcript, hypothesis)
     else:
-        print("[decoder] No checkpoint supplied; using deterministic random init.")
-
-    decoder_model.eval()
-    with torch.no_grad():
-        x_tensor = torch.from_numpy(recon).unsqueeze(1)
-        logits = decoder_model(x_tensor)
-    hypothesis = ctc_greedy_decode(logits, decoder_model.ALPHABET)
-    wer_value = word_error_rate(transcript, hypothesis)
+        print("[decoder] WER omitted: no trained decoder checkpoint supplied.")
 
     metrics = {
         "global_mae": global_mae,
@@ -242,6 +223,8 @@ def main():
         "decoder_hypothesis": hypothesis,
         "reference_transcript": transcript,
         "wer": wer_value,
+        "wer_status": "trained checkpoint supplied; caller must verify provenance" if wer_value is not None else "not evaluated: no trained decoder",
+        "snr_domain": "MFCC feature space, not waveform audio",
         "reconstruction_audio": os.path.relpath(recon_audio_path, args.exp_path),
     }
     metrics_path = os.path.join(analysis_dir, "metrics.json")
@@ -250,7 +233,7 @@ def main():
 
     print(f"Wrote metrics to {metrics_path}")
     print(f"Decoded transcript: {hypothesis}")
-    print(f"WER: {wer_value:.4f}")
+    print(f"WER: {wer_value:.4f}" if wer_value is not None else "WER: not evaluated")
 
 
 if __name__ == "__main__":
