@@ -1,5 +1,30 @@
 # Federated ASR Gradient Inversion
 
+> **This repository is superseded by [Unsplice](https://github.com/takakhoo/unsplice).**
+> The attack here matches gradients by optimisation and does not recover speech (MFCC error 8.78 on its best 10 s run).
+> Unsplice recovers the features exactly, in closed form, from the same kind of update: 98.5% of 1,417 LibriSpeech utterances up to 6.2 s at 115 dB feature SNR, and utterances up to 35 s by sequential decoding, with no transcript and no optimisation.
+> Audio synthesised from the recovered features is transcribed by Whisper at 3.8% WER and the speaker is identified in 98% of cases.
+
+## What changed
+
+| | This repository (2025) | [Unsplice](https://github.com/takakhoo/unsplice) (2026) |
+|---|---|---|
+| Method | gradient descent on a dummy input until the output-layer gradient matches | linear algebra on the first-layer gradient; sequential decoding from deeper layers |
+| Needs the transcript | yes | no |
+| Needs the utterance length | yes | no, it is read from the gradient's rank |
+| Model | DeepSpeech-1 with the nonlinearity removed | DeepSpeech-1 with clipped ReLU, Transformer-CTC |
+| Longest utterance | 10 s | 35 s |
+| MFCC mean absolute error | 8.78 | about 1e-5 |
+| Time per utterance | 3,200 s | about 2 s (closed form), about 40 s (sequential) |
+
+Why the old attack stalls: it matches only the output layer, whose gradient has rank at most 29 (one direction per character class). That is far too little to pin down hundreds of frames, so the optimiser finds inputs with the right gradient and the wrong features. Unsplice uses the first layer, whose gradient has one independent direction per frame.
+
+What is still useful here: the twice-differentiable log-space CTC loss (`src/ctc/ctc_loss_imp.py`), which Unsplice keeps as `unsplice/ctc2.py` for its baseline, and the recorded runs under `reports/`.
+
+The original README follows.
+
+---
+
 ## Reproduce the numerical/privacy diagnostic on CPU
 
 ```bash
